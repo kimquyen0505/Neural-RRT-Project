@@ -6,66 +6,47 @@ import random
 import math
 import time
 import glob
-import heapq # Thư viện hàng đợi ưu tiên cho A*
+import heapq 
 import scipy.interpolate as interpolate
+import os # <--- Thư viện để quản lý file/folder
 
 # --- CẤU HÌNH ---
 MAP_SIZE = 256
 MODEL_INPUT_SIZE = 128 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+RESULT_DIR = "./demo_results" # Tên folder lưu kết quả
 
 # ==========================================
-# 1. BỘ KIỂM TRA ĐƯỜNG ĐI (QUAN TRỌNG MỚI THÊM)
+# 1. BỘ KIỂM TRA ĐƯỜNG ĐI
 # ==========================================
 def check_connectivity(grid, start, goal):
-    """
-    Dùng A* trên Grid để kiểm tra nhanh xem có đường đi từ Start đến Goal không.
-    Trả về True nếu có đường, False nếu đường cụt.
-    """
-    # 8 hướng di chuyển
     neighbors = [(0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]
-    
     close_set = set()
-    came_from = {}
     gscore = {start:0}
     fscore = {start:math.hypot(start[0]-goal[0], start[1]-goal[1])}
-    
     oheap = []
     heapq.heappush(oheap, (fscore[start], start))
     
     while oheap:
         current = heapq.heappop(oheap)[1]
-        
-        if current == goal:
-            return True # Tìm thấy đường -> Map hợp lệ!
-        
+        if current == goal: return True
         close_set.add(current)
-        
         for i, j in neighbors:
             neighbor = current[0] + i, current[1] + j
-            
-            # Check biên và vật cản
             if 0 <= neighbor[0] < grid.shape[1] and 0 <= neighbor[1] < grid.shape[0]:
-                if grid[neighbor[1]][neighbor[0]] == 1: # 1 là tường
-                    continue
-            else:
-                continue
-                
-            if neighbor in close_set:
-                continue
+                if grid[neighbor[1]][neighbor[0]] == 1: continue
+            else: continue
+            if neighbor in close_set: continue
             
-            tentative_g_score = gscore[current] + math.hypot(i, j)
-            
-            if neighbor not in gscore or tentative_g_score < gscore[neighbor]:
-                came_from[neighbor] = current
-                gscore[neighbor] = tentative_g_score
-                fscore[neighbor] = tentative_g_score + math.hypot(neighbor[0]-goal[0], neighbor[1]-goal[1])
+            tentative_g = gscore[current] + math.hypot(i, j)
+            if neighbor not in gscore or tentative_g < gscore[neighbor]:
+                gscore[neighbor] = tentative_g
+                fscore[neighbor] = tentative_g + math.hypot(neighbor[0]-goal[0], neighbor[1]-goal[1])
                 heapq.heappush(oheap, (fscore[neighbor], neighbor))
-                
-    return False # Hết đường mà không tới đích -> Đường cụt
+    return False
 
 # ==========================================
-# 2. MODEL U-NET (Standard - Khớp file .pth)
+# 2. MODEL U-NET (Standard)
 # ==========================================
 class DoubleConv(nn.Module):
     def __init__(self, in_c, out_c):
@@ -89,7 +70,6 @@ class UNet(nn.Module):
         self.up3 = nn.ConvTranspose2d(256, 128, 2, stride=2);  self.u3 = DoubleConv(256, 128)
         self.up4 = nn.ConvTranspose2d(128, 64, 2, stride=2);   self.u4 = DoubleConv(128, 64)
         self.out = nn.Conv2d(64, out_c, 1)
-        
     def forward(self, x):
         x1 = self.d1(x); p1 = self.p1(x1)
         x2 = self.d2(p1); p2 = self.p2(x2)
@@ -106,7 +86,6 @@ class UNet(nn.Module):
 # 3. CÁC HÀM HỖ TRỢ
 # ==========================================
 def create_organic_cavern(size):
-    # Tạo hang động thoáng hơn một chút
     grid = (np.random.rand(size, size) > 0.55).astype(np.uint8) 
     for _ in range(5):
         new_grid = grid.copy()
@@ -221,9 +200,14 @@ class RRTStar:
         return path[::-1]
 
 # ==========================================
-# 5. MAIN (SMART LOOP)
+# 5. MAIN
 # ==========================================
 def main():
+    # --- TẠO FOLDER LƯU KẾT QUẢ ---
+    if not os.path.exists(RESULT_DIR):
+        os.makedirs(RESULT_DIR)
+        print(f"📁 Đã tạo folder lưu kết quả: {RESULT_DIR}")
+
     pth_files = glob.glob("*.pth")
     if not pth_files: print("❌ Không tìm thấy model"); return
     MODEL_PATH = pth_files[0]
@@ -236,27 +220,20 @@ def main():
         print("✅ Model OK!")
     except Exception as e: print(f"❌ Lỗi: {e}"); return
 
-    # --- VÒNG LẶP SINH MAP (Đảm bảo tìm được map có đường đi) ---
+    # --- VÒNG LẶP SINH MAP ---
     print("🛠 Đang sinh map HANG ĐỘNG (và kiểm tra đường đi)...")
     
     attempts_map = 0
     while True:
         attempts_map += 1
-        # 1. Sinh map ngẫu nhiên
         grid = create_organic_cavern(MAP_SIZE)
-        
-        # 2. Tìm Start/Goal
         s_cand, g_cand = None, None
         
-        # Thử tìm cặp điểm xa nhau 100 lần trên map này
         for _ in range(100):
             s = (random.randint(20, 230), random.randint(20, 230))
             g = (random.randint(20, 230), random.randint(20, 230))
-            
             if grid[s[1], s[0]] == 0 and grid[g[1], g[0]] == 0:
                 if math.hypot(s[0]-g[0], s[1]-g[1]) > 150:
-                    # 3. KIỂM TRA TÍNH KHẢ THI (SOLVABILITY CHECK)
-                    # Chạy A* nhanh để xem có đường không
                     if check_connectivity(grid, s, g):
                         s_cand, g_cand = s, g
                         break 
@@ -266,7 +243,7 @@ def main():
             print(f"✅ Đã tìm thấy map hợp lệ sau {attempts_map} lần thử!")
             break
         else:
-            print(f"⚠️ Map {attempts_map} là đường cụt, đang sinh lại...", end="\r")
+            print(f"⚠️ Map {attempts_map} là đường cụt...", end="\r")
 
     cv2.circle(grid, start, 5, 0, -1); cv2.circle(grid, goal, 5, 0, -1)
 
@@ -282,6 +259,7 @@ def main():
     path_ai = rrt_ai.planning(max_iter=15000) 
     t_ai = time.time() - t0
 
+    # --- VẼ ---
     vis = np.zeros((MAP_SIZE, MAP_SIZE, 3), dtype=np.uint8)
     vis[grid == 0] = [30, 30, 30]; vis[grid == 1] = [50, 100, 160] 
     
@@ -310,7 +288,14 @@ def main():
     cv2.putText(vis, f"Std Time: {t_std:.3f}s", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
     cv2.putText(vis, f"AI Time: {t_ai:.3f}s", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50,255,50), 2)
     
-    cv2.imshow("Smart Demo (Solvable Maps Only)", vis)
+    # --- LƯU ẢNH ---
+    # Tạo tên file theo thời gian thực (năm-tháng-ngày_giờ-phút-giây)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    filename = f"{RESULT_DIR}/result_{timestamp}.png"
+    cv2.imwrite(filename, vis)
+    print(f"💾 Đã lưu kết quả vào: {filename}")
+
+    cv2.imshow("Smart Demo (Saved)", vis)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
